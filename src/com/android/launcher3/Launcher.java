@@ -90,7 +90,15 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.animation.OvershootInterpolator;
+import android.graphics.Typeface;
+import android.text.format.DateFormat;
+import android.view.Gravity;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 import android.widget.Toast;
+
+import com.android.internal.BoringdroidManager;
 
 import androidx.annotation.CallSuper;
 import androidx.annotation.Nullable;
@@ -294,6 +302,11 @@ public class Launcher extends StatefulActivity<LauncherState> implements Launche
 
     // UI and state for the overview panel
     private View mOverviewPanel;
+
+    // Desktop mode taskbar
+    private View mDesktopTaskbar;
+    private TextView mTaskbarClock;
+    private BroadcastReceiver mTimeChangeReceiver;
 
     @Thunk
     boolean mWorkspaceLoading = true;
@@ -526,6 +539,14 @@ public class Launcher extends StatefulActivity<LauncherState> implements Launche
 
         mOldConfig.setTo(newConfig);
         super.onConfigurationChanged(newConfig);
+
+        if (BoringdroidManager.isPCModeEnabled()) {
+            if (mDesktopTaskbar != null) {
+                mHotseat.setVisibility(View.GONE);
+            } else {
+                initDesktopMode();
+            }
+        }
     }
 
     @Override
@@ -540,6 +561,10 @@ public class Launcher extends StatefulActivity<LauncherState> implements Launche
         dispatchDeviceProfileChanged();
         reapplyUi();
         mDragLayer.recreateControllers();
+
+        if (BoringdroidManager.isPCModeEnabled() && mDesktopTaskbar != null) {
+            mHotseat.setVisibility(View.GONE);
+        }
 
         // Calling onSaveInstanceState ensures that static cache used by listWidgets is
         // initialized properly.
@@ -1171,6 +1196,88 @@ public class Launcher extends StatefulActivity<LauncherState> implements Launche
         mDropTargetBar.setup(mDragController);
 
         mAllAppsController.setupViews(mAppsView, mScrimView);
+
+        if (BoringdroidManager.isPCModeEnabled()) {
+            initDesktopMode();
+        }
+    }
+
+    private void initDesktopMode() {
+        if (mDesktopTaskbar != null) return;
+
+        final int tbHeight = dpToPx(48);
+
+        LinearLayout taskbar = new LinearLayout(this);
+        taskbar.setOrientation(LinearLayout.HORIZONTAL);
+        taskbar.setBackgroundColor(0xFF1C1B1F);
+
+        Button startBtn = new Button(this, null, android.R.attr.borderlessButtonStyle);
+        startBtn.setText("Start");
+        startBtn.setTextColor(0xFFFFFFFF);
+        startBtn.setTextSize(13);
+        startBtn.setTypeface(null, Typeface.BOLD);
+        startBtn.setPadding(dpToPx(16), 0, dpToPx(16), 0);
+        startBtn.setOnClickListener(v -> {
+            if (isInState(ALL_APPS)) {
+                mStateManager.goToState(NORMAL);
+            } else {
+                mStateManager.goToState(ALL_APPS);
+            }
+        });
+
+        mTaskbarClock = new TextView(this);
+        mTaskbarClock.setTextColor(0xFFFFFFFF);
+        mTaskbarClock.setTextSize(13);
+        mTaskbarClock.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
+        mTaskbarClock.setPadding(0, 0, dpToPx(16), 0);
+        updateClock();
+
+        taskbar.addView(startBtn, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, tbHeight));
+        taskbar.addView(mTaskbarClock, new LinearLayout.LayoutParams(
+                0, tbHeight, 1f));
+
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, tbHeight);
+        lp.gravity = Gravity.BOTTOM;
+        mDragLayer.addView(taskbar, lp);
+        mDesktopTaskbar = taskbar;
+
+        mDragLayer.setClipToPadding(true);
+        mDragLayer.setPadding(
+                mDragLayer.getPaddingLeft(),
+                mDragLayer.getPaddingTop(),
+                mDragLayer.getPaddingRight(),
+                tbHeight);
+
+        mHotseat.setVisibility(View.GONE);
+
+        setupClockReceiver();
+    }
+
+    private void updateClock() {
+        if (mTaskbarClock != null) {
+            mTaskbarClock.setText(DateFormat.getTimeFormat(this).format(new java.util.Date()));
+        }
+    }
+
+    private void setupClockReceiver() {
+        if (mTimeChangeReceiver != null) return;
+        mTimeChangeReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                updateClock();
+            }
+        };
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_TIME_TICK);
+        filter.addAction(Intent.ACTION_TIME_CHANGED);
+        filter.addAction(Intent.ACTION_TIMEZONE_CHANGED);
+        registerReceiver(mTimeChangeReceiver, filter);
+    }
+
+    private int dpToPx(int dp) {
+        return (int) (dp * getResources().getDisplayMetrics().density + 0.5f);
     }
 
     /**
@@ -1552,6 +1659,10 @@ public class Launcher extends StatefulActivity<LauncherState> implements Launche
         ACTIVITY_TRACKER.onActivityDestroyed(this);
 
         unregisterReceiver(mScreenOffReceiver);
+        if (mTimeChangeReceiver != null) {
+            unregisterReceiver(mTimeChangeReceiver);
+            mTimeChangeReceiver = null;
+        }
         mWorkspace.removeFolderListeners();
         PluginManagerWrapper.INSTANCE.get(this).removePluginListener(this);
 
