@@ -1091,7 +1091,32 @@ public class Launcher extends StatefulActivity<LauncherState> implements Launche
             mOverlayManager.onActivityResumed(this);
         }
 
+        if (BoringdroidManager.isPCModeEnabled()) {
+            if (mDesktopTaskbar == null) {
+                initDesktopMode();
+            }
+        } else if (mDesktopTaskbar != null) {
+            removeDesktopMode();
+        }
+
         TraceHelper.INSTANCE.endSection(traceToken);
+    }
+
+    private void removeDesktopMode() {
+        Log.d(TAG, "removeDesktopMode");
+        if (mDesktopTaskbar != null) {
+            LauncherRootView root = findViewById(R.id.launcher);
+            root.removeView(mDesktopTaskbar);
+            mDesktopTaskbar = null;
+        }
+        mTaskbarClock = null;
+        if (mTimeChangeReceiver != null) {
+            unregisterReceiver(mTimeChangeReceiver);
+            mTimeChangeReceiver = null;
+        }
+        mDragLayer.setClipToPadding(false);
+        mDragLayer.setPadding(0, 0, 0, 0);
+        mHotseat.setVisibility(View.VISIBLE);
     }
 
     @Override
@@ -1204,6 +1229,7 @@ public class Launcher extends StatefulActivity<LauncherState> implements Launche
     }
 
     private void initDesktopMode() {
+        Log.d(TAG, "initDesktopMode called, enabled=" + BoringdroidManager.isPCModeEnabled());
         if (mDesktopTaskbar != null) return;
 
         final int tbHeight = dpToPx(48);
