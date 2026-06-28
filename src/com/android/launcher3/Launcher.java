@@ -1238,10 +1238,13 @@ public class Launcher extends StatefulActivity<LauncherState> implements Launche
         taskbar.addView(mTaskbarClock, new LinearLayout.LayoutParams(
                 0, tbHeight, 1f));
 
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, tbHeight);
+        LauncherRootView root = findViewById(R.id.launcher);
+        InsettableFrameLayout.LayoutParams lp =
+                new InsettableFrameLayout.LayoutParams(
+                        InsettableFrameLayout.LayoutParams.MATCH_PARENT, tbHeight);
         lp.gravity = Gravity.BOTTOM;
-        mDragLayer.addView(taskbar, lp);
+        lp.ignoreInsets = true;
+        root.addView(taskbar, lp);
         mDesktopTaskbar = taskbar;
 
         mDragLayer.setClipToPadding(true);
