@@ -1223,13 +1223,15 @@ public class Launcher extends StatefulActivity<LauncherState> implements Launche
 
         mAllAppsController.setupViews(mAppsView, mScrimView);
 
-        if (BoringdroidManager.isPCModeEnabled()) {
+        boolean dexEnabled = BoringdroidManager.isPCModeEnabled();
+        Log.d(TAG, "setupViews: LegacyDex enabled=" + dexEnabled);
+        if (dexEnabled) {
             initDesktopMode();
         }
     }
 
     private void initDesktopMode() {
-        Log.d(TAG, "initDesktopMode called, enabled=" + BoringdroidManager.isPCModeEnabled());
+        Log.d(TAG, "initDesktopMode");
         if (mDesktopTaskbar != null) return;
 
         final int tbHeight = dpToPx(48);
