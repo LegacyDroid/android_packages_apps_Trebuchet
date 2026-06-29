@@ -6,97 +6,62 @@ import android.view.Choreographer;
 import android.view.SurfaceControl;
 
 import com.android.systemui.shared.system.RemoteAnimationTargetCompat;
-import com.android.systemui.shared.system.SurfaceControlCompat;
-
-import java.io.PrintWriter;
-import java.io.StringWriter;
 
 public class FluidSurfaceMorpher implements Choreographer.FrameCallback {
 
     public static final String PROP_FLUID_ENABLED = "persist.sys.fluid_animations.enabled";
 
     private static final float STIFFNESS = 300f;
-    private static final float DAMPING_RATIO = 0.85f;
+    private static final float DAMPING_RATIO = 0.86f;
 
     private final int mTaskId;
     private final SurfaceControl mLeash;
     private final SurfaceControl.Transaction mTransaction;
     private final Runnable mOnComplete;
 
-    private final SpringSolver mXSpring, mYSpring, mScaleSpring, mCropBottomSpring, mRadiusSpring;
-    private final Rect mCurrentCrop = new Rect();
-    private final Rect mStartBounds;
-    private final Rect mTargetBounds;
+    private final SpringSolver mCenterXSpring, mCenterYSpring, mWidthSpring, mHeightSpring, mRadiusSpring;
 
+    private final Rect mAppBounds;
+    private final Rect mCurrentCrop = new Rect();
     private long mLastFrameTimeNanos;
     private boolean mIsRunning;
-    private boolean mIsOpening;
 
     public static boolean isEnabled() {
         return SystemProperties.getBoolean(PROP_FLUID_ENABLED, false);
     }
 
-    public FluidSurfaceMorpher(int taskId, RemoteAnimationTargetCompat target,
-                               Rect startBounds, Rect targetBounds, Runnable onComplete) {
+    public FluidSurfaceMorpher(int taskId, RemoteAnimationTargetCompat target, FluidMotionState priorState,
+                               Rect appBounds, Rect targetVisualBounds, float targetRadius, Runnable onComplete) {
         this.mTaskId = taskId;
         this.mLeash = target.leash.getSurfaceControl();
         this.mTransaction = new SurfaceControl.Transaction();
         this.mOnComplete = onComplete;
-        this.mStartBounds = new Rect(startBounds);
-        this.mTargetBounds = new Rect(targetBounds);
-        this.mIsOpening = target.mode == RemoteAnimationTargetCompat.MODE_OPENING;
+        this.mAppBounds = new Rect(appBounds);
 
-        float targetScale = (float) targetBounds.width() / startBounds.width();
-        float targetCropBottom = targetBounds.height() / targetScale;
+        float targetCenterX = targetVisualBounds.exactCenterX();
+        float targetCenterY = targetVisualBounds.exactCenterY();
+        float targetWidth = targetVisualBounds.width();
+        float targetHeight = targetVisualBounds.height();
 
-        mXSpring = new SpringSolver(startBounds.left, 0, STIFFNESS, DAMPING_RATIO);
-        mYSpring = new SpringSolver(startBounds.top, 0, STIFFNESS, DAMPING_RATIO);
-        mScaleSpring = new SpringSolver(1.0f, 0, STIFFNESS, DAMPING_RATIO);
-        mCropBottomSpring = new SpringSolver(startBounds.bottom, 0, STIFFNESS, DAMPING_RATIO);
-        mRadiusSpring = new SpringSolver(0f, 0, STIFFNESS, DAMPING_RATIO);
+        if (priorState != null) {
+            mCenterXSpring = new SpringSolver(priorState.centerX, priorState.vCenterX, STIFFNESS, DAMPING_RATIO);
+            mCenterYSpring = new SpringSolver(priorState.centerY, priorState.vCenterY, STIFFNESS, DAMPING_RATIO);
+            mWidthSpring = new SpringSolver(priorState.width, priorState.vWidth, STIFFNESS, DAMPING_RATIO);
+            mHeightSpring = new SpringSolver(priorState.height, priorState.vHeight, STIFFNESS, DAMPING_RATIO);
+            mRadiusSpring = new SpringSolver(priorState.radius, priorState.vRadius, STIFFNESS, DAMPING_RATIO);
+        } else {
+            mCenterXSpring = new SpringSolver(appBounds.exactCenterX(), 0, STIFFNESS, DAMPING_RATIO);
+            mCenterYSpring = new SpringSolver(appBounds.exactCenterY(), 0, STIFFNESS, DAMPING_RATIO);
+            mWidthSpring = new SpringSolver(appBounds.width(), 0, STIFFNESS, DAMPING_RATIO);
+            mHeightSpring = new SpringSolver(appBounds.height(), 0, STIFFNESS, DAMPING_RATIO);
+            mRadiusSpring = new SpringSolver(0, 0, STIFFNESS, DAMPING_RATIO);
+        }
 
-        mXSpring.setTarget(targetBounds.left);
-        mYSpring.setTarget(targetBounds.top);
-        mScaleSpring.setTarget(targetScale);
-        mCropBottomSpring.setTarget(targetCropBottom);
-        mRadiusSpring.setTarget(60f);
-
-        mCurrentCrop.set(0, 0, startBounds.right, startBounds.bottom);
-    }
-
-    public FluidSurfaceMorpher(int taskId, RemoteAnimationTargetCompat target,
-                               FluidMotionState state,
-                               Rect startBounds, Rect targetBounds,
-                               Runnable onComplete) {
-        this.mTaskId = taskId;
-        this.mLeash = target.leash.getSurfaceControl();
-        this.mTransaction = new SurfaceControl.Transaction();
-        this.mOnComplete = onComplete;
-        this.mStartBounds = new Rect(startBounds);
-        this.mTargetBounds = new Rect(targetBounds);
-        this.mIsOpening = target.mode == RemoteAnimationTargetCompat.MODE_OPENING;
-
-        float targetScale = (float) targetBounds.width() / startBounds.width();
-        float targetCropBottom = targetBounds.height() / targetScale;
-
-        mXSpring = new SpringSolver(state.x, state.vx, STIFFNESS, DAMPING_RATIO);
-        mYSpring = new SpringSolver(state.y, state.vy, STIFFNESS, DAMPING_RATIO);
-        mScaleSpring = new SpringSolver(state.scale, state.vscale, STIFFNESS, DAMPING_RATIO);
-        mCropBottomSpring = new SpringSolver(state.cropBottom, state.vcrop, STIFFNESS, DAMPING_RATIO);
-        mRadiusSpring = new SpringSolver(state.radius, state.vradius, STIFFNESS, DAMPING_RATIO);
-
-        mXSpring.setTarget(targetBounds.left);
-        mYSpring.setTarget(targetBounds.top);
-        mScaleSpring.setTarget(targetScale);
-        mCropBottomSpring.setTarget(targetCropBottom);
-        mRadiusSpring.setTarget(60f);
-
-        mCurrentCrop.set(0, 0, startBounds.right, (int) state.cropBottom);
-        applyToSurface();
-    }
-
-    public void addGestureVelocityY(float velocityY) {
-        mYSpring.setVelocity(velocityY);
+        mCenterXSpring.setTarget(targetCenterX);
+        mCenterYSpring.setTarget(targetCenterY);
+        mWidthSpring.setTarget(targetWidth);
+        mHeightSpring.setTarget(targetHeight);
+        mRadiusSpring.setTarget(targetRadius);
     }
 
     public void start() {
@@ -111,10 +76,10 @@ public class FluidSurfaceMorpher implements Choreographer.FrameCallback {
         mIsRunning = false;
         Choreographer.getInstance().removeFrameCallback(this);
         return new FluidMotionState(
-                mXSpring.getValue(), mXSpring.getVelocity(),
-                mYSpring.getValue(), mYSpring.getVelocity(),
-                mScaleSpring.getValue(), mScaleSpring.getVelocity(),
-                mCropBottomSpring.getValue(), mCropBottomSpring.getVelocity(),
+                mCenterXSpring.getValue(), mCenterXSpring.getVelocity(),
+                mCenterYSpring.getValue(), mCenterYSpring.getVelocity(),
+                mWidthSpring.getValue(), mWidthSpring.getVelocity(),
+                mHeightSpring.getValue(), mHeightSpring.getVelocity(),
                 mRadiusSpring.getValue(), mRadiusSpring.getVelocity()
         );
     }
@@ -125,44 +90,62 @@ public class FluidSurfaceMorpher implements Choreographer.FrameCallback {
 
         float dt = (frameTimeNanos - mLastFrameTimeNanos) / 1_000_000_000f;
         mLastFrameTimeNanos = frameTimeNanos;
-        if (dt > 0.032f) dt = 0.032f;
 
-        boolean xSettled = mXSpring.update(dt);
-        boolean ySettled = mYSpring.update(dt);
-        boolean scaleSettled = mScaleSpring.update(dt);
-        boolean cropSettled = mCropBottomSpring.update(dt);
-        mRadiusSpring.update(dt);
+        boolean cxSettled = mCenterXSpring.update(dt);
+        boolean cySettled = mCenterYSpring.update(dt);
+        boolean wSettled = mWidthSpring.update(dt);
+        boolean hSettled = mHeightSpring.update(dt);
+        boolean rSettled = mRadiusSpring.update(dt);
 
-        applyToSurface();
+        applySpatialMorphology();
 
-        if (xSettled && ySettled && scaleSettled && cropSettled) {
-            mIsRunning = false;
-            FluidAnimationConductor.getInstance().unregisterAnimation(mTaskId);
-            if (mOnComplete != null) mOnComplete.run();
+        if (cxSettled && cySettled && wSettled && hSettled && rSettled) {
+            finishMorph();
         } else {
             Choreographer.getInstance().postFrameCallback(this);
         }
     }
 
-    private void applyToSurface() {
-        try {
-            float scale = mScaleSpring.getValue();
-            float x = mXSpring.getValue();
-            float y = mYSpring.getValue();
-
-            mCurrentCrop.bottom = (int) mCropBottomSpring.getValue();
-
-            mTransaction.setMatrix(mLeash,
-                            scale, 0f,
-                            0f, scale)
-                    .setPosition(mLeash, x, y)
-                    .setWindowCrop(mLeash, mCurrentCrop)
-                    .setCornerRadius(mLeash, mRadiusSpring.getValue())
-                    .apply();
-        } catch (Exception e) {
-            mIsRunning = false;
-            FluidAnimationConductor.getInstance().unregisterAnimation(mTaskId);
-            if (mOnComplete != null) mOnComplete.run();
+    private void applySpatialMorphology() {
+        if (mLeash == null || !mLeash.isValid()) {
+            finishMorph();
+            return;
         }
+
+        try {
+            float w = mWidthSpring.getValue();
+            float h = mHeightSpring.getValue();
+            float cx = mCenterXSpring.getValue();
+            float cy = mCenterYSpring.getValue();
+            float radius = mRadiusSpring.getValue();
+
+            float appW = mAppBounds.width();
+
+            float scale = w / appW;
+            if (scale <= 0.001f) scale = 0.001f;
+
+            float tx = cx - (w / 2f);
+            float ty = cy - (h / 2f);
+
+            mCurrentCrop.set(0, 0, (int) appW, (int) (h / scale));
+
+            float scaledRadius = radius / scale;
+
+            mTransaction.setMatrix(mLeash, scale, 0f, 0f, scale)
+                    .setPosition(mLeash, tx, ty)
+                    .setWindowCrop(mLeash, mCurrentCrop)
+                    .setCornerRadius(mLeash, scaledRadius)
+                    .setAlpha(mLeash, 1f)
+                    .apply();
+
+        } catch (Exception e) {
+            finishMorph();
+        }
+    }
+
+    private void finishMorph() {
+        mIsRunning = false;
+        FluidAnimationConductor.getInstance().unregisterAnimation(mTaskId);
+        if (mOnComplete != null) mOnComplete.run();
     }
 }

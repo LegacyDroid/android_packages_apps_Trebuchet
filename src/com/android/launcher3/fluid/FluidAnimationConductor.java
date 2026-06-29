@@ -1,24 +1,22 @@
 package com.android.launcher3.fluid;
 
-import android.util.SparseArray;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class FluidAnimationConductor {
     private static FluidAnimationConductor sInstance;
-    private final SparseArray<FluidSurfaceMorpher> mActiveAnimations = new SparseArray<>();
+    private final ConcurrentHashMap<Integer, FluidSurfaceMorpher> mActiveAnimations = new ConcurrentHashMap<>();
 
     private FluidAnimationConductor() {}
 
-    public static FluidAnimationConductor getInstance() {
+    public static synchronized FluidAnimationConductor getInstance() {
         if (sInstance == null) sInstance = new FluidAnimationConductor();
         return sInstance;
     }
 
     public FluidMotionState stealStateAndCancel(int taskId) {
-        FluidSurfaceMorpher activeMorpher = mActiveAnimations.get(taskId);
+        FluidSurfaceMorpher activeMorpher = mActiveAnimations.remove(taskId);
         if (activeMorpher != null) {
-            FluidMotionState interruptedState = activeMorpher.cancelAndExtractState();
-            mActiveAnimations.remove(taskId);
-            return interruptedState;
+            return activeMorpher.cancelAndExtractState();
         }
         return null;
     }

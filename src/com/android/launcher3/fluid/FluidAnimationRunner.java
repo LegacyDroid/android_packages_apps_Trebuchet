@@ -13,10 +13,10 @@ import com.android.launcher3.LauncherAnimationRunner;
 import com.android.launcher3.WrappedAnimationRunnerImpl;
 import com.android.systemui.shared.system.RemoteAnimationTargetCompat;
 
-
 public class FluidAnimationRunner implements WrappedAnimationRunnerImpl {
 
     private static final long SPRING_TIMEOUT_MS = 5000;
+    private static final float ICON_CORNER_RADIUS = 60f;
 
     private final Handler mHandler;
     private final Launcher mLauncher;
@@ -39,7 +39,7 @@ public class FluidAnimationRunner implements WrappedAnimationRunnerImpl {
     public void onCreateAnimation(RemoteAnimationTargetCompat[] appTargets,
                                   RemoteAnimationTargetCompat[] wallpaperTargets,
                                   LauncherAnimationRunner.AnimationResult result) {
-        if (appTargets.length == 0) {
+        if (appTargets == null || appTargets.length == 0) {
             result.setAnimation(new AnimatorSet(), mLauncher);
             return;
         }
@@ -55,78 +55,77 @@ public class FluidAnimationRunner implements WrappedAnimationRunnerImpl {
 
         Rect startBounds = mIsOpening ? iconBounds : screenBounds;
         Rect endBounds = mIsOpening ? screenBounds : iconBounds;
+        float targetRadius = mIsOpening ? 0f : ICON_CORNER_RADIUS;
 
-        // Watchdog animator: keeps leash alive until physics settle
-        final ValueAnimator watchdog = ValueAnimator.ofFloat(0, 1);
-        watchdog.setDuration(SPRING_TIMEOUT_MS);
+        final ValueAnimator systemSyncAnimator = ValueAnimator.ofFloat(0, 1);
+        systemSyncAnimator.setDuration(SPRING_TIMEOUT_MS);
 
-        FluidMotionState stolenState = FluidAnimationConductor.getInstance().stealStateAndCancel(taskId);
-        FluidSurfaceMorpher morpher;
+        final boolean[] morphCompleted = new boolean[]{false};
 
         Runnable onComplete = () -> {
-            // Springs settled — end the watchdog to trigger system finish callback
-            if (watchdog.isStarted()) {
-                watchdog.end();
+            morphCompleted[0] = true;
+            if (systemSyncAnimator.isRunning()) {
+                systemSyncAnimator.cancel();
             }
         };
 
-        if (stolenState != null) {
-            morpher = new FluidSurfaceMorpher(taskId, target, stolenState,
-                    startBounds, endBounds, onComplete);
-        } else {
-            morpher = new FluidSurfaceMorpher(taskId, target,
-                    startBounds, endBounds, onComplete);
-        }
+        FluidMotionState stolenState = FluidAnimationConductor.getInstance().stealStateAndCancel(taskId);
 
-        // Timeout: if springs never settle, force-end everything
-        watchdog.addListener(new AnimatorListenerAdapter() {
+        FluidSurfaceMorpher morpher = new FluidSurfaceMorpher(
+                taskId, target, stolenState,
+                screenBounds,
+                endBounds,
+                targetRadius, onComplete);
+
+        systemSyncAnimator.addListener(new AnimatorListenerAdapter() {
             @Override
             public void onAnimationEnd(Animator animation) {
-                FluidMotionState remaining = FluidAnimationConductor.getInstance()
-                        .stealStateAndCancel(taskId);
-                if (remaining != null) {
-                    forceFinalState(target, endBounds);
+                if (!morphCompleted[0]) {
+                    FluidMotionState remaining = FluidAnimationConductor.getInstance().stealStateAndCancel(taskId);
+                    if (remaining != null) {
+                        forceFinalState(target, endBounds, targetRadius);
+                    }
                 }
             }
         });
 
         FluidAnimationConductor.getInstance().registerAnimation(taskId, morpher);
 
-        AnimatorSet set = new AnimatorSet();
-        set.play(watchdog);
-        result.setAnimation(set, mLauncher);
+        AnimatorSet syncSet = new AnimatorSet();
+        syncSet.play(systemSyncAnimator);
+        result.setAnimation(syncSet, mLauncher);
 
         morpher.start();
     }
 
-    private void forceFinalState(RemoteAnimationTargetCompat target, Rect endBounds) {
+    private void forceFinalState(RemoteAnimationTargetCompat target, Rect endBounds, float targetRadius) {
         try {
             android.view.SurfaceControl.Transaction t = new android.view.SurfaceControl.Transaction();
-            float scale = (float) endBounds.width()
-                    / mLauncher.getDeviceProfile().widthPx;
+            float scale = (float) endBounds.width() / mLauncher.getDeviceProfile().widthPx;
             android.view.SurfaceControl leashSc = target.leash.getSurfaceControl();
+
+            Rect crop = new Rect(0, 0, mLauncher.getDeviceProfile().widthPx,
+                                (int) (endBounds.height() / scale));
+
             t.setMatrix(leashSc, scale, 0, 0, scale)
                     .setPosition(leashSc, endBounds.left, endBounds.top)
-                    .setWindowCrop(leashSc,
-                            endBounds.width(), endBounds.height())
+                    .setWindowCrop(leashSc, crop)
+                    .setCornerRadius(leashSc, targetRadius / scale)
                     .apply();
         } catch (Exception ignored) {}
     }
 
     private Rect getIconBoundsOnScreen() {
         Rect bounds = new Rect();
-        if (mIconView != null) {
+        if (mIconView != null && mIconView.isAttachedToWindow()) {
             int[] pos = new int[2];
             mIconView.getLocationOnScreen(pos);
-            bounds.set(pos[0], pos[1],
-                    pos[0] + mIconView.getWidth(),
-                    pos[1] + mIconView.getHeight());
+            bounds.set(pos[0], pos[1], pos[0] + mIconView.getWidth(), pos[1] + mIconView.getHeight());
         } else {
             int iconSize = mLauncher.getDeviceProfile().iconSizePx;
             int cx = mLauncher.getDeviceProfile().widthPx / 2;
             int cy = mLauncher.getDeviceProfile().heightPx / 2;
-            bounds.set(cx - iconSize / 2, cy - iconSize / 2,
-                    cx + iconSize / 2, cy + iconSize / 2);
+            bounds.set(cx - iconSize / 2, cy - iconSize / 2, cx + iconSize / 2, cy + iconSize / 2);
         }
         return bounds;
     }
