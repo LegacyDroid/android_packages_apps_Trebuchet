@@ -69,6 +69,8 @@ import com.android.launcher3.DeviceProfile.OnDeviceProfileChangeListener;
 import com.android.launcher3.allapps.AllAppsTransitionController;
 import com.android.launcher3.config.FeatureFlags;
 import com.android.launcher3.dragndrop.DragLayer;
+import com.android.launcher3.fluid.FluidAnimationRunner;
+import com.android.launcher3.fluid.FluidSurfaceMorpher;
 import com.android.launcher3.shortcuts.DeepShortcutView;
 import com.android.launcher3.statehandlers.DepthController;
 import com.android.launcher3.util.DynamicResource;
@@ -207,6 +209,14 @@ public abstract class QuickstepAppTransitionManagerImpl extends LauncherAppTrans
     @Override
     public ActivityOptions getActivityLaunchOptions(Launcher launcher, View v) {
         if (hasControlRemoteAppTransitionPermission()) {
+            if (FluidSurfaceMorpher.isEnabled() && !isLaunchingFromRecents(v, null /* targets */)) {
+                mAppLaunchRunner = new FluidAnimationRunner(mHandler, mLauncher, v, true);
+                RemoteAnimationRunnerCompat runner = new WrappedLauncherAnimationRunner<>(
+                        mAppLaunchRunner, true /* startAtFrontOfQueue */);
+                return ActivityOptionsCompat.makeRemoteAnimation(new RemoteAnimationAdapterCompat(
+                        runner, APP_LAUNCH_DURATION, 0));
+            }
+
             boolean fromRecents = isLaunchingFromRecents(v, null /* targets */);
             mAppLaunchRunner = new AppLaunchAnimationRunner(mHandler, v);
             RemoteAnimationRunnerCompat runner = new WrappedLauncherAnimationRunner<>(
