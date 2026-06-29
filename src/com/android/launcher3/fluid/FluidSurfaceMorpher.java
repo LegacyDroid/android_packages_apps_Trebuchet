@@ -33,7 +33,7 @@ public class FluidSurfaceMorpher implements Choreographer.FrameCallback {
     private boolean mIsOpening;
 
     public static boolean isEnabled() {
-        return SystemProperties.getBoolean(PROP_FLUID_ENABLED, true);
+        return SystemProperties.getBoolean(PROP_FLUID_ENABLED, false);
     }
 
     public FluidSurfaceMorpher(int taskId, RemoteAnimationTargetCompat target,
