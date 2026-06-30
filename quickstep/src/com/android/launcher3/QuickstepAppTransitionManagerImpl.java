@@ -59,7 +59,10 @@ import android.os.Build;
 import android.os.CancellationSignal;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Process;
+import android.os.UserHandle;
 import android.util.Pair;
+import android.util.SparseArray;
 import android.view.View;
 
 import androidx.annotation.NonNull;
@@ -69,14 +72,15 @@ import com.android.launcher3.DeviceProfile.OnDeviceProfileChangeListener;
 import com.android.launcher3.allapps.AllAppsTransitionController;
 import com.android.launcher3.config.FeatureFlags;
 import com.android.launcher3.dragndrop.DragLayer;
-import com.android.launcher3.fluid.FluidAnimationRunner;
-import com.android.launcher3.fluid.FluidSurfaceMorpher;
+import com.android.launcher3.model.data.ItemInfo;
 import com.android.launcher3.shortcuts.DeepShortcutView;
 import com.android.launcher3.statehandlers.DepthController;
 import com.android.launcher3.util.DynamicResource;
 import com.android.launcher3.util.MultiValueAlpha;
 import com.android.launcher3.util.MultiValueAlpha.AlphaProperty;
+import com.android.launcher3.folder.FolderIcon;
 import com.android.launcher3.views.FloatingIconView;
+import com.android.launcher3.Utilities;
 import com.android.quickstep.RemoteAnimationTargets;
 import com.android.quickstep.util.MultiValueUpdateListener;
 import com.android.quickstep.util.RemoteAnimationProvider;
@@ -163,6 +167,9 @@ public abstract class QuickstepAppTransitionManagerImpl extends LauncherAppTrans
     private WrappedAnimationRunnerImpl mAppLaunchRunner;
     private WrappedAnimationRunnerImpl mKeyguardGoingAwayRunner;
 
+    // Maps taskId → packageName for app→icon close animation
+    private static final SparseArray<String> sTaskPackageNames = new SparseArray<>();
+
     private final AnimatorListenerAdapter mForceInvisibleListener = new AnimatorListenerAdapter() {
         @Override
         public void onAnimationStart(Animator animation) {
@@ -209,14 +216,6 @@ public abstract class QuickstepAppTransitionManagerImpl extends LauncherAppTrans
     @Override
     public ActivityOptions getActivityLaunchOptions(Launcher launcher, View v) {
         if (hasControlRemoteAppTransitionPermission()) {
-            if (FluidSurfaceMorpher.isEnabled() && !isLaunchingFromRecents(v, null /* targets */)) {
-                mAppLaunchRunner = new FluidAnimationRunner(mHandler, mLauncher, v, true);
-                RemoteAnimationRunnerCompat runner = new WrappedLauncherAnimationRunner<>(
-                        mAppLaunchRunner, true /* startAtFrontOfQueue */);
-                return ActivityOptionsCompat.makeRemoteAnimation(new RemoteAnimationAdapterCompat(
-                        runner, APP_LAUNCH_DURATION, 0));
-            }
-
             boolean fromRecents = isLaunchingFromRecents(v, null /* targets */);
             mAppLaunchRunner = new AppLaunchAnimationRunner(mHandler, v);
             RemoteAnimationRunnerCompat runner = new WrappedLauncherAnimationRunner<>(
@@ -746,21 +745,185 @@ public abstract class QuickstepAppTransitionManagerImpl extends LauncherAppTrans
 
     /**
      * Animator that controls the transformations of the windows the targets that are closing.
+     * Mirrors getOpeningWindowAnimators exactly — same matrix math, same easing, reversed props.
      */
     private Animator getClosingWindowAnimators(RemoteAnimationTargetCompat[] appTargets,
             RemoteAnimationTargetCompat[] wallpaperTargets) {
+        return getClosingWindowAnimators(appTargets, wallpaperTargets, null);
+    }
+
+    private Animator getClosingWindowAnimators(RemoteAnimationTargetCompat[] appTargets,
+            RemoteAnimationTargetCompat[] wallpaperTargets, @Nullable View iconView) {
+        // Resolve the closing window bounds (first MODE_CLOSING target, or full screen).
+        Rect windowTargetBounds = new Rect(0, 0, mDeviceProfile.widthPx, mDeviceProfile.heightPx);
+        for (RemoteAnimationTargetCompat t : appTargets) {
+            if (t.mode == MODE_CLOSING) {
+                windowTargetBounds.set(t.screenSpaceBounds);
+                break;
+            }
+        }
+
+        if (iconView != null) {
+            return getIconCloseAnimator(appTargets, wallpaperTargets, iconView, windowTargetBounds);
+        }
+        return getDefaultCloseAnimator(appTargets, windowTargetBounds);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    //  Icon close — reverse of getOpeningWindowAnimators
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Close animation: directly scale+translate the app window into its
+     * home-screen icon.  Uses a single transform (scale around window center
+     * + translate to icon center) and corner-radius interpolation.
+     */
+    private Animator getIconCloseAnimator(RemoteAnimationTargetCompat[] appTargets,
+            RemoteAnimationTargetCompat[] wallpaperTargets, View iconView, Rect windowTargetBounds) {
+        SurfaceTransactionApplier surfaceApplier = new SurfaceTransactionApplier(mDragLayer);
+        RemoteAnimationTargets closingTargets =
+                new RemoteAnimationTargets(appTargets, wallpaperTargets, MODE_CLOSING);
+        closingTargets.addReleaseCheck(surfaceApplier);
+
+        Rect iconBounds = new Rect();
+        if (iconView instanceof BubbleTextView) {
+            ((BubbleTextView) iconView).getIconBounds(iconBounds);
+        } else if (iconView instanceof FolderIcon) {
+            ((FolderIcon) iconView).getPreviewBounds(iconBounds);
+        } else {
+            iconBounds.set(0, 0, iconView.getWidth(), iconView.getHeight());
+        }
+        float[] pts = new float[]{
+                iconBounds.left, iconBounds.top,
+                iconBounds.right, iconBounds.bottom};
+        Utilities.getDescendantCoordRelativeToAncestor(
+                iconView, mDragLayer, pts, false, true);
+        float iconCx = (pts[0] + pts[2]) / 2f;
+        float iconCy = (pts[1] + pts[3]) / 2f;
+        float iconW = Math.abs(pts[2] - pts[0]);
+        float iconH = Math.abs(pts[3] - pts[1]);
+
+        // Icon coords are in dragLayer space; matrix operates in screen space
+        int[] dragLayerBounds = new int[2];
+        mDragLayer.getLocationOnScreen(dragLayerBounds);
+        float iconScreenCx = iconCx + dragLayerBounds[0];
+        float iconScreenCy = iconCy + dragLayerBounds[1];
+
+        float winCx = windowTargetBounds.centerX();
+        float winCy = windowTargetBounds.centerY();
+        float winW = windowTargetBounds.width();
+        float winH = windowTargetBounds.height();
+
+        float endScale = Math.max(iconW / winW, iconH / winH);
+        float endDx = iconScreenCx - winCx;
+        float endDy = iconScreenCy - winCy;
+        float endRadius = Math.min(iconW, iconH) / 2f;
+
+        float startScale = 1f;
+        if (iconView instanceof BubbleTextView
+                && !(iconView.getParent() instanceof DeepShortcutView)) {
+            Drawable dr = ((BubbleTextView) iconView).getIcon();
+            if (dr instanceof FastBitmapDrawable) {
+                startScale = ((FastBitmapDrawable) dr).getAnimatedScale();
+            }
+        }
+        final float initialStartScale = startScale;
+
+        boolean useUpwardAnimation = iconCy > (winCy - dragLayerBounds[1]);
+        long xDuration = useUpwardAnimation ? APP_LAUNCH_CURVED_DURATION : APP_LAUNCH_DOWN_DURATION;
+        long yDuration = useUpwardAnimation ? APP_LAUNCH_DURATION : APP_LAUNCH_DOWN_CURVED_DURATION;
+        long alphaDuration = useUpwardAnimation ? APP_LAUNCH_ALPHA_DURATION : APP_LAUNCH_ALPHA_DOWN_DURATION;
+
+        float windowCornerRadius = mDeviceProfile.isMultiWindowMode
+                ? 0 : getWindowCornerRadius(mLauncher.getResources());
+
+        long alphaStartDelay = APP_LAUNCH_DURATION - alphaDuration - APP_LAUNCH_ALPHA_START_DELAY;
+
+        ValueAnimator animator = ValueAnimator.ofFloat(0, 1);
+        animator.setDuration(APP_LAUNCH_DURATION);
+        animator.setInterpolator(LINEAR);
+        animator.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                closingTargets.release();
+            }
+        });
+
+        animator.addUpdateListener(new MultiValueUpdateListener() {
+            FloatProp mDx      = new FloatProp(endDx, 0, 0, xDuration, AGGRESSIVE_EASE);
+            FloatProp mDy      = new FloatProp(endDy, 0, 0, yDuration, AGGRESSIVE_EASE);
+            FloatProp mScale   = new FloatProp(endScale, initialStartScale, 0,
+                    APP_LAUNCH_DURATION, EXAGGERATED_EASE);
+            FloatProp mAlpha   = new FloatProp(0f, 1f, alphaStartDelay,
+                    alphaDuration, LINEAR);
+            FloatProp mCorner  = new FloatProp(endRadius, windowCornerRadius, 0,
+                    RADIUS_DURATION, EXAGGERATED_EASE);
+
+            @Override
+            public void onUpdate(float percent) {
+                Matrix mat = new Matrix();
+                // M = T(winCx+mDx, winCy+mDy) * S(mScale) * T(-winCx, -winCy)
+                mat.preTranslate(-winCx, -winCy);
+                mat.preScale(mScale.value, mScale.value);
+                mat.preTranslate(winCx + mDx.value, winCy + mDy.value);
+
+                SurfaceParams[] params = new SurfaceParams[appTargets.length];
+                for (int i = appTargets.length - 1; i >= 0; i--) {
+                    RemoteAnimationTargetCompat target = appTargets[i];
+                    SurfaceParams.Builder builder = new SurfaceParams.Builder(target.leash);
+
+                    if (target.mode == MODE_CLOSING) {
+                        builder.withMatrix(mat)
+                                .withAlpha(mAlpha.value)
+                                .withCornerRadius(mCorner.value);
+                    } else {
+                        Point tmpPos = new Point(target.position.x, target.position.y);
+                        if (target.localBounds != null) {
+                            tmpPos.set(target.localBounds.left, target.localBounds.top);
+                        }
+                        Matrix identity = new Matrix();
+                        identity.setTranslate(tmpPos.x, tmpPos.y);
+                        Rect nonClosingCrop = new Rect(target.screenSpaceBounds);
+                        nonClosingCrop.offsetTo(0, 0);
+                        builder.withMatrix(identity)
+                                .withWindowCrop(nonClosingCrop)
+                                .withAlpha(1f);
+                    }
+                    params[i] = builder.build();
+                }
+                surfaceApplier.scheduleApply(params);
+            }
+        });
+        return animator;
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    //  Default close — slide down + fade (no icon target available)
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Fallback close animation: the window slides downward and fades out.
+     * Used when no matching icon is found on the workspace.
+     */
+    private Animator getDefaultCloseAnimator(RemoteAnimationTargetCompat[] appTargets,
+            Rect windowTargetBounds) {
         SurfaceTransactionApplier surfaceApplier = new SurfaceTransactionApplier(mDragLayer);
         Matrix matrix = new Matrix();
         Point tmpPos = new Point();
-        ValueAnimator closingAnimator = ValueAnimator.ofFloat(0, 1);
-        int duration = CLOSING_TRANSITION_DURATION_MS;
+
         float windowCornerRadius = mDeviceProfile.isMultiWindowMode
                 ? 0 : getWindowCornerRadius(mLauncher.getResources());
-        closingAnimator.setDuration(duration);
-        closingAnimator.addUpdateListener(new MultiValueUpdateListener() {
-            FloatProp mDy = new FloatProp(0, mClosingWindowTransY, 0, duration, DEACCEL_1_7);
-            FloatProp mScale = new FloatProp(1f, 1f, 0, duration, DEACCEL_1_7);
-            FloatProp mAlpha = new FloatProp(1f, 0f, 25, 125, LINEAR);
+
+        ValueAnimator animator = ValueAnimator.ofFloat(0, 1);
+        animator.setDuration(CLOSING_TRANSITION_DURATION_MS);
+        animator.setInterpolator(LINEAR);
+        animator.addUpdateListener(new MultiValueUpdateListener() {
+            // Slide down (positive Y) and fade out. Direction is 0 → +transY
+            // so the window exits downward, consistent with launcher content sliding in.
+            FloatProp mDy    = new FloatProp(0, mClosingWindowTransY, 0,
+                    CLOSING_TRANSITION_DURATION_MS, DEACCEL_1_7);
+            FloatProp mAlpha = new FloatProp(1f, 0f, 0,
+                    CLOSING_TRANSITION_DURATION_MS, LINEAR);
 
             @Override
             public void onUpdate(float percent) {
@@ -774,31 +937,46 @@ public abstract class QuickstepAppTransitionManagerImpl extends LauncherAppTrans
                         tmpPos.set(target.localBounds.left, target.localBounds.top);
                     }
 
+                    Rect targetCrop = new Rect(target.screenSpaceBounds);
+                    targetCrop.offsetTo(0, 0);
+
                     if (target.mode == MODE_CLOSING) {
-                        matrix.setScale(mScale.value, mScale.value,
-                                target.screenSpaceBounds.centerX(),
-                                target.screenSpaceBounds.centerY());
-                        matrix.postTranslate(0, mDy.value);
-                        matrix.postTranslate(tmpPos.x, tmpPos.y);
+                        matrix.setTranslate(tmpPos.x, tmpPos.y + mDy.value);
                         builder.withMatrix(matrix)
+                                .withWindowCrop(targetCrop)
                                 .withAlpha(mAlpha.value)
                                 .withCornerRadius(windowCornerRadius);
                     } else {
                         matrix.setTranslate(tmpPos.x, tmpPos.y);
                         builder.withMatrix(matrix)
+                                .withWindowCrop(targetCrop)
                                 .withAlpha(1f);
                     }
-                    final Rect crop = new Rect(target.screenSpaceBounds);
-                    crop.offsetTo(0, 0);
-                    params[i] = builder
-                            .withWindowCrop(crop)
-                            .build();
+                    params[i] = builder.build();
                 }
                 surfaceApplier.scheduleApply(params);
             }
         });
+        return animator;
+    }
 
-        return closingAnimator;
+    /**
+     * Finds the icon view on the workspace for the first MODE_CLOSING target.
+     * Uses the taskId→packageName mapping saved during app launch.
+     */
+    private View findClosingAppIcon(RemoteAnimationTargetCompat[] appTargets) {
+        if (appTargets == null) return null;
+        for (RemoteAnimationTargetCompat target : appTargets) {
+            if (target.mode == MODE_CLOSING) {
+                String pkg = sTaskPackageNames.get(target.taskId);
+                if (pkg != null) {
+                    sTaskPackageNames.remove(target.taskId);
+                    return mLauncher.getWorkspace().getFirstMatchForAppClose(pkg,
+                            Process.myUserHandle());
+                }
+            }
+        }
+        return null;
     }
 
     private boolean hasControlRemoteAppTransitionPermission() {
@@ -856,9 +1034,10 @@ public abstract class QuickstepAppTransitionManagerImpl extends LauncherAppTrans
 
             if (anim == null) {
                 anim = new AnimatorSet();
+                View closeIcon = findClosingAppIcon(appTargets);
                 anim.play(mFromUnlock
                         ? getUnlockWindowAnimator(appTargets, wallpaperTargets)
-                        : getClosingWindowAnimators(appTargets, wallpaperTargets));
+                        : getClosingWindowAnimators(appTargets, wallpaperTargets, closeIcon));
 
                 // Normally, we run the launcher content animation when we are transitioning
                 // home, but if home is already visible, then we don't want to animate the
@@ -930,6 +1109,18 @@ public abstract class QuickstepAppTransitionManagerImpl extends LauncherAppTrans
                 composeRecentsLaunchAnimator(anim, mV, appTargets, wallpaperTargets,
                         launcherClosing);
             } else {
+                // Save package name for close animation lookup
+                if (mV != null && mV.getTag() instanceof ItemInfo) {
+                    ItemInfo info = (ItemInfo) mV.getTag();
+                    if (info.getTargetComponent() != null) {
+                        String pkg = info.getTargetComponent().getPackageName();
+                        for (RemoteAnimationTargetCompat target : appTargets) {
+                            if (target.mode == MODE_OPENING) {
+                                sTaskPackageNames.put(target.taskId, pkg);
+                            }
+                        }
+                    }
+                }
                 composeIconLaunchAnimator(anim, mV, appTargets, wallpaperTargets,
                         launcherClosing);
             }
